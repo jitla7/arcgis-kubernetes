@@ -1,0 +1,390 @@
+/**
+ * # Organization Terraform Module for ArcGIS Enterprise on Kubernetes
+ *
+ * The module deploys ArcGIS Enterprise on Kubernetes in Amazon EKS cluster and creates an ArcGIS Enterprise organization.
+ *
+ * ![ArcGIS Enterprise on Kubernetes](arcgis-enterprise-k8s-organization.png "ArcGIS Enterprise on Kubernetes")  
+ *
+ * The module uses the Helm Charts for ArcGIS Enterprise on Kubernetes.
+ * The Helm charts package for the ArcGIS Enterprise version used by the deployment 
+ * is downloaded from My Esri and extracted in the module's `helm-charts/arcgis-enterprise/<Helm charts version>` directory.
+ *
+ * The module creates a Kubernetes pod to execute Enterprise Admin CLI commands and updates the DR settings to use the specified storage class and size for staging volume.
+ * The module also creates an S3 bucket for the organization object store, registers it with the deployment, 
+ * and registers backup store using S3 bucket specified by "/arcgis/${var.site_id}/s3/backup" SSM parameter.
+ *
+ * The deployment's CloudWatch dashboard displays the CloudWatch metrics and container logs of the deployment.
+ *
+ * ## Requirements
+ * 
+ * On the machine where Terraform is executed:
+ * 
+ * * AWS credentials must be configured.
+ * * ArcGIS Online credentials must be set by ARCGIS_ONLINE_PASSWORD and ARCGIS_ONLINE_USERNAME environment variables.
+ * * EKS cluster configuration information must be provided in ~/.kube/config file.
+ * * Path to aws/scripts directory must be added to PYTHONPATH.
+ *
+ * ## SSM Parameters
+ *
+ * The module reads the following SSM parameters: 
+ *
+ * | SSM parameter name | Description |
+ * |--------------------|-------------|
+ * | /arcgis/${var.site_id}/s3/backup | Backup S3 bucket name |
+ * | /arcgis/${var.site_id}/${var.deployment_id}/deployment-fqdn | Fully qualified domain name of the deployment |
+ */
+
+# Copyright 2024-2026 Esri
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+ 
+terraform {
+  backend "s3" {
+    key = "arcgis-enterprise/aws/arcgis-enterprise-k8s/organization.tfstate"
+  }
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.10"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.12"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.26"
+    }
+  }
+
+  required_version = ">= 1.10.0"
+}
+
+provider "helm" {
+  kubernetes {
+    config_path = "~/.kube/config"
+  }
+}
+
+provider "kubernetes" {
+  config_path = "~/.kube/config"
+}
+
+provider "aws" {
+  region = var.aws_region
+  
+  default_tags {
+    tags = {
+      ArcGISAutomation   = "arcgis-gitops"      
+      ArcGISSiteId       = var.site_id
+      ArcGISDeploymentId = var.deployment_id
+    }
+  }
+}
+
+data "aws_region" "current" {}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_ssm_parameter" "s3_backup" {
+  name = "/arcgis/${var.site_id}/s3/backup"
+}
+
+data "aws_ssm_parameter" "deployment_fqdn" {
+  name        = "/arcgis/${var.site_id}/${var.deployment_id}/deployment-fqdn"
+}
+
+locals {
+  # Currently only ECR with IAM authentication is supported by the modified Helm chart
+  container_registry         = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.region}.amazonaws.com"
+  enterprise_admin_cli_image = "${local.container_registry}/enterprise-admin-cli:${var.enterprise_admin_cli_version}"
+
+  configure_cloud_stores = true
+
+  backup_store_suffix = replace(var.arcgis_version, ".", "-")
+  backup_store = "s3-backup-store-${local.backup_store_suffix}"
+  backup_root_dir = "${var.deployment_id}/${var.arcgis_version}"
+
+  deployment_fqdn = nonsensitive(data.aws_ssm_parameter.deployment_fqdn.value)
+  
+  manifest_file_path = "./manifests/arcgis-enterprise-k8s-files-${var.arcgis_version}.json"
+}
+
+resource "kubernetes_secret" "admin_cli_credentials" {
+  metadata {
+    name      = "admin-cli-credentials"
+    namespace = var.deployment_id
+  }
+
+  data = {
+    username = var.admin_username
+    password = var.admin_password
+  }
+}
+
+# Kubernetes pod used to execute Enterprise Admin CLI commands using "kubectl exec".
+resource "kubernetes_pod" "enterprise_admin_cli" {
+  metadata {
+    name      = "enterprise-admin-cli"
+    namespace = var.deployment_id
+  }
+
+  spec {
+    container {
+      name  = "enterprise-admin-cli"
+      image = local.enterprise_admin_cli_image
+      image_pull_policy = "Always"
+      env {
+        name  = "ARCGIS_ENTERPRISE_URL"
+        value = "https://${local.deployment_fqdn}/${var.arcgis_enterprise_context}"
+      }
+      env {
+        name = "ARCGIS_ENTERPRISE_USER"
+        value_from {
+          secret_key_ref {
+            name = kubernetes_secret.admin_cli_credentials.metadata[0].name
+            key  = "username"
+          }
+        }
+      }
+      env {
+        name = "ARCGIS_ENTERPRISE_PASSWORD_FILE"
+        value = "/var/run/secrets/admin-cli-credentials/password"
+      }
+      resources {
+        limits = {
+          cpu    = "500m"
+          memory = "256Mi"
+        }
+        requests = {
+          cpu    = "50m"
+          memory = "128Mi"
+        }
+      }
+      command = [
+        "sleep", "infinity"
+      ]
+      volume_mount {
+        name       = "admin-cli-credentials"
+        read_only  = true
+        mount_path = "/var/run/secrets/admin-cli-credentials"
+      }
+    }
+    volume {
+      name = "admin-cli-credentials"
+      secret {
+        secret_name = kubernetes_secret.admin_cli_credentials.metadata[0].name
+      }
+    }
+    restart_policy = "Always"
+  }
+
+  depends_on = [
+    kubernetes_secret.admin_cli_credentials
+  ]
+}
+
+# Create S3 bucket for the organization object store for versions 1.2.0 and newer
+# if cloud_config_json_file_path is not specified.
+resource "aws_s3_bucket" "object_store" {
+  count = local.configure_cloud_stores && var.cloud_config_json_file_path == null ? 1 : 0
+  bucket_prefix = "${var.deployment_id}-object-store"
+  force_destroy = true
+}
+
+# Install Helm charts for ArcGIS Enterprise on Kubernetes.
+module "helm_charts" {
+  source = "./modules/helm-charts"
+  index_file = local.manifest_file_path
+  install_dir = "./helm-charts/arcgis-enterprise"
+}
+
+resource "local_sensitive_file" "license_file" {
+  content  = file(var.authorization_file_path)
+  filename = "${module.helm_charts.helm_charts_path}/user-inputs/license.json"
+
+  depends_on = [ 
+    module.helm_charts 
+  ]
+}
+
+# Create cloud-config.json file for cloud stores in the Helm chart's user-input directory
+# if the file path is specified either by cloud_config_json_file_path input variable
+# or configured with the default setings.
+resource "local_sensitive_file" "cloud_config_json_file" {
+  count = local.configure_cloud_stores || var.cloud_config_json_file_path != null ? 1 : 0
+  content = (var.cloud_config_json_file_path != null ?
+    file(var.cloud_config_json_file_path) :
+    jsonencode([{
+      name = "AWS"
+      credential = {
+        type = "IAM-ROLE"
+      }
+      cloudServices = [{
+        name  = "AWS S3"
+        type  = "objectStore"
+        usage = "DEFAULT"
+        connection = {
+          bucketName = aws_s3_bucket.object_store[0].bucket
+          region     = data.aws_region.current.region
+          rootDir    = var.deployment_id
+        }
+        category = "storage"
+      }]
+  }]))
+  filename = "${module.helm_charts.helm_charts_path}/user-inputs/cloud-config.json"
+
+  depends_on = [ 
+    module.helm_charts
+  ]
+}
+
+resource "helm_release" "arcgis_enterprise" {
+  name      = "arcgis"
+  chart     = module.helm_charts.helm_charts_path
+  namespace = var.deployment_id
+  timeout   = 21600 # 6 hours
+
+  set_sensitive {
+    name  = "configure.admin.password"
+    value = var.admin_password
+  }
+
+  set_sensitive {
+    name  = "configure.securityQuestionAnswer"
+    value = var.security_question_answer
+  }
+
+  set_sensitive {
+    name  = "upgrade.token"
+    value = var.upgrade_token
+  }
+
+  values = [
+    module.helm_charts.configure_yaml_content,
+    yamlencode({
+      image = {
+        registry   = local.container_registry
+        repository = var.image_repository_prefix
+        # The EKS cluster uses IAM authentication for ECR access, 
+        # However the Helm charts before 1.5.0 required setting container registry credentials.
+        username   = "AWS"
+        password   = "AWS"
+        authenticationType = "integrated"
+      }
+      install = {
+        enterpriseFQDN              = local.deployment_fqdn
+        context                     = var.arcgis_enterprise_context
+        allowedPrivilegedContainers = true
+        configureWaitTimeMin        = var.configure_wait_time_min
+        ingress = {
+          tls = {
+            selfSignCN = local.deployment_fqdn
+          }
+        }
+        k8sClusterDomain = var.k8s_cluster_domain
+      }
+      common = {
+        verbose = var.common_verbose
+      }
+      configure = {
+        enabled           = var.configure_enterprise_org
+        systemArchProfile = var.system_arch_profile
+        licenseFile       = "user-inputs/license.json"
+        licenseTypeId     = var.license_type_id
+        admin = {
+          username  = var.admin_username
+          email     = var.admin_email
+          firstName = var.admin_first_name
+          lastName  = var.admin_last_name
+        }
+        securityQuestionIndex   = var.security_question_index
+        cloudConfigJsonFilename = local.configure_cloud_stores || var.cloud_config_json_file_path != null ? "user-inputs/cloud-config.json" : null
+        logSetting              = var.log_setting
+        logRetentionMaxDays     = var.log_retention_max_days
+        storage                 = var.storage
+      }
+      upgrade = {
+        mandatoryUpdateTargetId = var.mandatory_update_target_id
+        licenseFile             = "user-inputs/license.json"
+      }
+    })
+  ]
+
+  depends_on = [
+    local_sensitive_file.license_file,
+    local_sensitive_file.cloud_config_json_file,
+    kubernetes_pod.enterprise_admin_cli
+  ]
+}
+
+module "update_dr_settings" {
+  source        = "./modules/cli-command"
+  namespace     = var.deployment_id
+  admin_cli_pod = kubernetes_pod.enterprise_admin_cli.metadata[0].name
+  command = [
+    "gis", "update-dr-settings",
+    "--storage-class", var.staging_volume_class,
+    "--size", var.staging_volume_size,
+    "--timeout", var.backup_job_timeout
+  ]
+  depends_on = [
+    helm_release.arcgis_enterprise
+  ]
+}
+
+# Register default S3 backup store using S3 bucket specified by 
+# "/arcgis/${var.site_id}/s3/backup" SSM parameter.
+module "register_s3_backup_store" {
+  count = local.configure_cloud_stores ? 1 : 0
+  source        = "./modules/cli-command"
+  namespace     = var.deployment_id
+  admin_cli_pod = kubernetes_pod.enterprise_admin_cli.metadata[0].name
+  command = [
+    "gis", "register-s3-backup-store",
+    "--store", local.backup_store,
+    "--bucket", nonsensitive(data.aws_ssm_parameter.s3_backup.value),
+    "--region", data.aws_region.current.region,
+    "--root", local.backup_root_dir,
+    "--is-default"
+  ]
+  depends_on = [
+    module.update_dr_settings
+  ]
+}
+
+# module "register_pv_backup_store" {
+#   count = local.configure_cloud_stores ? 0 : 1
+#   source        = "./modules/cli-command"
+#   namespace     = var.deployment_id
+#   admin_cli_pod = kubernetes_pod.enterprise_admin_cli.metadata[0].name
+#   command = [
+#     "gis", "register-pv-backup-store",
+#     "--store", "pv-backup-store",
+#     "--storage-class", "gp3",
+#     "--size", "64Gi",
+#     "--is-dynamic",
+#     "--is-default"
+#   ]
+#   depends_on = [
+#     module.update_dr_settings
+#   ]
+# }
+
+module "monitoring" {
+  source        = "./modules/monitoring"
+  cluster_name  = var.site_id
+  namespace     = var.deployment_id
+}
+

@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Copyright 2025 Esri
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+command=$1
+
+admin_commands=( \
+    "create-backup" \
+    "generate-token" \
+    "get-backup-stores" \
+    "get-dr-settings" \
+    "register-pv-backup-store" \
+    "register-s3-backup-store" \
+    "register-az-backup-store" \
+    "restore-organization" \
+    "update-dr-settings" )
+
+gis_commands=( \
+    "test-nb-admin" \
+    "test-publish-csv" \
+    "test-server-admin" )
+
+print_usage() {
+    echo "usage: gis <command> [args]"
+    echo "Valid commands are:"
+    for cmd in "${admin_commands[@]}"; do
+        echo "  $cmd"
+    done
+    for cmd in "${gis_commands[@]}"; do
+        echo "  $cmd"
+    done
+    echo ""
+    echo "For command help run:"
+    echo "  gis <command> -h"
+}
+
+if [[ -z "$command" ]]; then
+    echo "Error: no command provided."
+    print_usage
+    exit 1
+fi
+
+# Replace dashes with underscores to match module names
+if [[ " ${admin_commands[@]} " =~ " $command " ]]; then
+    module=$(echo "commands.$command" | sed -r 's/[-]+/_/g')
+elif [[ " ${gis_commands[@]} " =~ " $command " ]]; then
+    module=$(echo "scripts.$command" | sed -r 's/[-]+/_/g')
+else
+    echo "Error: invalid command '$command'."
+    print_usage
+    exit 1
+fi
+
+source activate base
+conda activate arcgis
+
+python -m $module "${@:2}"

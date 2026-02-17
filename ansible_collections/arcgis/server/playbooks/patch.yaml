@@ -1,0 +1,46 @@
+---
+# Copyright 2024 Esri
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This playbook installs ArcGIS Server patches on the target machine.
+
+- name: Install ArcGIS Server patches
+  hosts: all
+  vars:
+    install_dir: '/opt' 
+    patches_directory: '/opt/software/archives/patches'
+    run_as_user: 'arcgis'
+    arcgis_server_patches: []
+  become: true
+  tasks:
+    - name: Stop arcgisserver service
+      ansible.builtin.service:
+        name: arcgisserver
+        state: stopped
+    - name: Install ArcGIS Server patches 
+      become: true
+      become_user: '{{ run_as_user }}'
+      vars:
+        ansible_aws_ssm_timeout: 3600
+      arcgis.common.install_patches:
+        patch: '{{ item }}'
+        dir: '{{ patches_directory }}'
+        log: '{{ install_dir }}/arcgis/server/.ESRI_S_PATCH_LOG'
+        product: 'server'
+      loop: '{{ arcgis_server_patches }}' 
+    - name: Start arcgisserver service
+      ansible.builtin.service:
+        name: arcgisserver
+        state: started
+

@@ -1,0 +1,215 @@
+# ArcGIS Enterprise on Kubernetes Deployment in Amazon EKS
+
+This template provides GitHub Actions workflows for [ArcGIS Enterprise on Kubernetes](https://www.esri.com/en-us/arcgis/products/arcgis-enterprise/kubernetes) deployment and operations in an Amazon EKS cluster.
+
+Supported ArcGIS Enterprise on Kubernetes versions:
+
+* 11.4.0
+* 11.5.0
+* 12.0.0
+
+Before running the template workflows:
+
+1. Configure the GitHub repository settings as described in the [Instructions](../README.md#instructions) section.
+2. Provision core AWS resources for ArcGIS Enterprise site and deploy EKS cluster using [arcgis-site-core](../arcgis-site-core/README.md) template.
+
+To enable the template's workflows, copy the .yaml files from the template's `workflows` directory to `/.github/workflows` directory in `main` branch and the deployment branch, commit the changes, and push the branches to GitHub.
+
+> Refer to READMEs of the Terraform modules for descriptions of the configuration properties.
+
+## Initial Deployment
+
+Initial deployment of ArcGIS Enterprise on Kubernetes includes provisioning container images, creating an ingress controller, creating an ArcGIS Enterprise organization, and testing deployment web services.
+
+> The IAM principal used by the template's workflows must have EKS cluster administrator permissions. The IAM principal used to create the EKS cluster is granted the required permissions by the site-k8s-cluster-aws workflow.
+
+### 1. Set GitHub Actions Secrets for the Site
+
+Set the primary ArcGIS Enterprise site administrator credentials in the GitHub Actions secrets of the repository settings.
+
+| Name                      | Description                                    |
+|---------------------------|------------------------------------------------|
+| ENTERPRISE_K8S_ADMIN_USERNAME | ArcGIS Enterprise on Kubernetes administrator user name      |
+| ENTERPRISE_K8S_ADMIN_PASSWORD | ArcGIS Enterprise on Kubernetes administrator user password  |
+
+> The ArcGIS Enterprise on Kubernetes administrator user name must be at least six characters. The only special characters allowed are the at sign (@), dash (-), dot (.), and underscore (_).
+
+> The ArcGIS Enterprise on Kubernetes administrator user password must be at least eight characters. It must contain at least one alphabet letter (uppercase or lowercase), one digit, and one special character. All special characters are allowed.
+
+### 2. Provisioning Container Images
+
+GitHub Actions workflow **enterprise-k8s-aws-image** builds a container image for [Enterprise Admin CLI](../../enterprise-admin-cli/README.md) and pushes it to a private AWS Elastic Container Registry (ECR) repository. If "pull_through_cache" property is set to `false`, the workflow also copies container images of the ArcGIS Enterprise on Kubernetes version from DockerHub to the private ECR repositories.
+
+The workflow uses [shell scripts](image/README.md) with [image.vars.json](../../config/aws/arcgis-enterprise-k8s/image.vars.json) config file.
+
+Required IAM policies:
+
+* ArcGISEnterpriseK8s
+
+Instructions:
+
+1. Change "arcgis_version" property in the config file to the required ArcGIS Enterprise on Kubernetes version.
+2. Commit the changes to the Git branch and push the branch to GitHub.
+3. Run enterprise-k8s-aws-image workflow using the branch.
+
+> Copying the container images may take several hours.
+
+### 3. Create Application Load Balancer Ingress
+
+GitHub Actions workflow **enterprise-k8s-aws-ingress** creates a Kubernetes namespace for ArcGIS Enterprise on Kubernetes deployment in Amazon EKS cluster and an Application Load Balancer (ALB) ingress that routes traffic to the deployment.
+
+The workflow uses [ingress](ingress/README.md) Terraform module with [ingress.tfvars.json](../../config/aws/arcgis-enterprise-k8s/ingress.tfvars.json) config file.
+
+> The "deployment_id" config property value is used as the Kubernetes namespace for the deployment. The "deployment_id" value must be unique within the EKS cluster.
+
+Required IAM policies:
+
+* ArcGISEnterpriseK8s
+* TerraformBackend
+
+Workflow Outputs:
+
+* alb_dns_name - DNS name of the load balancer
+
+Instructions:
+
+1. Provision or import an SSL certificate for the ArcGIS Enterprise domain name into AWS Certificate Manager service in the selected AWS region and set "ssl_certificate_arn" property in the config file to the certificate ARN.
+2. Set "deployment_fqdn" property to the ArcGIS Enterprise deployment domain name.
+3. If Route 53 is used, set "hosted_zone_id" property to the Route 53 hosted zone ID of the ArcGIS Enterprise domain name.
+4. Commit the changes to a Git branch and push the branch to GitHub.
+5. Run enterprise-k8s-aws-ingress workflow using the branch.
+6. If "hosted_zone_id" property was not specified, retrieve the DNS name of the load balancer created by the workflow and create a CNAME record for it within the DNS server of the ArcGIS Enterprise domain name.
+
+> Job outputs are not shown in the properties of completed GitHub Actions run. To retrieve the DNS name, check the run logs of "Terraform Apply" step or read it from "/arcgis/${var.site_id}/${var.deployment_id}/alb/dns-name" SSM parameter.
+
+> See [Elastic Load Balancing SSL negotiation configuration](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-https-listener.html#describe-ssl-policies) for the list of SSL policies.
+
+> By default "waf_mode" property is set to "detect", that configures the Web Application Firewall (WAF) rules assigned to the Application Load Balancer to count and log suspicious requests instead of blocking them. It is strongly recommended that all deployments start out running in “detect” mode to avoid breaking workflows unexpectedly. Once the rules are fully tuned and WAF logs no longer reveal false positives, the WAF can be shifted into “protect” mode.
+
+### 4. Create ArcGIS Enterprise Organization
+
+GitHub Actions workflow **enterprise-k8s-aws-organization** deploys ArcGIS Enterprise on Kubernetes in Amazon EKS cluster and creates an ArcGIS Enterprise organization.
+
+The workflow uses [organization](organization/README.md) Terraform template with [organization.tfvars.json](../../config/aws/arcgis-enterprise-k8s/organization.tfvars.json) config file.
+
+Required IAM policies:
+
+* TerraformBackend
+* ArcGISEnterpriseK8s
+
+Outputs:
+
+* arcgis_enterprise_manager_url - ArcGIS Enterprise Manager URL
+* arcgis_enterprise_portal_url - ArcGIS Enterprise Portal URL
+
+Instructions:
+
+1. Add ArcGIS Enterprise on Kubernetes authorization file for the ArcGIS Enterprise version to `/config/authorization/<ArcGIS version>` directory of the repository and set "authorization_file_path" property to the file path.
+2. Set "system_arch_profile" property to the required ArcGIS Enterprise on Kubernetes architecture profile.
+3. Set "admin_first_name", "admin_last_name", "security_question_index", and "security_question_answer" to the initial ArcGIS Enterprise administrator account properties.
+4. (Optional) Update "storage" property to configure the required storage classes, sizes, and types of the ArcGIS Enterprise deployment data stores.
+5. Commit the changes to the Git branch and push the branch to GitHub.
+6. Run enterprise-k8s-aws-organization workflow using the branch.
+
+> '~/config/' path is linked to the repository's /config directory. It's recommended to use /config directory for the configuration files.
+
+### 5. Test ArcGIS Enterprise Deployment
+
+GitHub Actions workflow **enterprise-k8s-aws-test** tests the ArcGIS Enterprise deployment.
+
+The workflow executes "test-publish-csv" script from [Enterprise Admin CLI](../../enterprise-admin-cli/README.md) to test the deployment's health. The script runs in the "enterprise-admin-cli" Kubernetes pod that impersonates an ArcGIS Enterprise user by retrieving the user credentials from the "admin-cli-credentials" Kubernetes secret.
+
+Required IAM policies:
+
+* ArcGISEnterpriseK8s
+
+Instructions:
+
+1. Run enterprise-k8s-aws-test workflow using the branch.
+
+## Backups and Disaster Recovery
+
+The templates support configuring the organization's disaster recovery settings, the default backup store in an S3 bucket, and provide workflows for [backup and restore](https://enterprise-k8s.arcgis.com/en/latest/administer/backup-and-restore.htm) operations.
+
+### Create Backups
+
+GitHub Actions workflow **enterprise-k8s-aws-backup** creates [ArcGIS Enterprise on Kubernetes backups](https://enterprise-k8s.arcgis.com/en/latest/administer/create-a-backup.htm).
+
+The workflow executes "create-backup" command from [Enterprise Admin CLI](../../enterprise-admin-cli/README.md) in "enterprise-admin-cli" Kubernetes pod that impersonates an ArcGIS Enterprise user by retrieving the user credentials from "admin-cli-credentials" Kubernetes secret.
+
+The command parameters are retrieved from [backup.vars.json](../../config/aws/arcgis-enterprise-k8s/backup.vars.json) config file.
+
+Required IAM policies:
+
+* ArcGISEnterpriseK8s
+
+Instructions:
+
+1. Set "passcode" property in the config file to the passcode that will be used to encrypt the content of the backup.
+2. (Optional) Set "retention" property in the config file to backup retention interval (in days).
+3. Commit the changes to the Git branch and push the branch to GitHub.
+4. Run enterprise-k8s-aws-backup workflow using the branch.
+
+> To meet the required recovery point objective (RPO), schedule runs of enterprise-k8s-aws-backup workflow by configuring 'schedule' event in enterprise-k8s-aws-backup.yaml file.
+
+### Restore from Backups
+
+GitHub Actions workflow **enterprise-k8s-aws-restore** [restores the organization](https://enterprise-k8s.arcgis.com/en/latest/administer/restore-a-backup.htm) to the state it was in when a specific backup was created. When restoring an organization to a previous state, any existing content and data present in its current state is replaced with the data contained in the backup.
+
+The workflow executes "restore-organization" command from [Enterprise Admin CLI](../../enterprise-admin-cli/README.md) in "enterprise-admin-cli" Kubernetes pod that impersonates an ArcGIS Enterprise user by retrieving the user credentials from "admin-cli-credentials" Kubernetes secret.
+
+The command parameters are retrieved from [restore.vars.json](../../config/aws/arcgis-enterprise-k8s/restore.vars.json) config file.
+
+Required IAM policies:
+
+* ArcGISEnterpriseK8s
+
+Instructions:
+
+1. (Optional) Set "backup" property in the config file to the backup name. If "backup" property is set to `null` or an empty string, the latest completed backup in the store will be used.
+2. Set "passcode" property in the config file to the passcode used to create the backup.
+3. Commit the changes to the Git branch and push the branch to GitHub.
+4. Run enterprise-k8s-aws-restore workflow using the branch.
+
+## Updates and Upgrades
+
+GitHub Actions workflow enterprise-k8s-aws-organization supports [updates and upgrades of ArcGIS Enterprise on Kubernetes](https://enterprise-k8s.arcgis.com/en/latest/administer/understand-updates.htm) organizations.
+
+Instructions:
+
+1. If pull through cache is not configured, copy the container images of the new ArcGIS Enterprise version to Amazon ECR.
+2. In case of upgrade to a new version, add ArcGIS Enterprise on Kubernetes authorization files for the new ArcGIS Enterprise version to `/config/authorization/<ArcGIS version>` directory of the repository and set "authorization_file_path" property in [organization.tfvars.json](../../config/aws/arcgis-enterprise-k8s/organization.tfvars.json) config file to the file path.
+3. Set "helm_charts_version" property to the Helm Charts version of the new ArcGIS Enterprise on Kubernetes version (see "Chart Version Compatibility" section in the charts' READMEs).
+4. Commit the changes to the Git branch and push the branch to GitHub.
+5. Run enterprise-k8s-aws-organization workflow using the branch.
+
+> Make a backup of the organization before performing an update or upgrade.
+
+## Destroying Deployments
+
+GitHub Actions workflow **enterprise-k8s-aws-destroy** destroys AWS resources created by enterprise-k8s-aws-organization and (optionally) enterprise-k8s-aws-ingress workflows.
+
+The workflow uses [organization](organization/README.md) Terraform template with [organization.tfvars.json](../../config/aws/arcgis-enterprise-k8s/organization.tfvars.json) config file.
+
+Required IAM policies:
+
+* TerraformBackend
+* ArcGISEnterpriseK8s
+
+Inputs:
+
+* delete_namespace - (Optional) Set to "true" to delete the Kubernetes namespace.
+
+Instructions:
+
+1. Run enterprise-k8s-aws-destroy workflow using the branch.
+
+## Disconnected Environments
+
+When deploying ArcGIS Enterprise on Kubernetes in disconnected environments:
+
+1. Make sure that the EKS cluster nodes are running in "internal" subnets.
+2. When creating ingress with enterprise-k8s-aws-ingress workflow, set "internal_load_balancer" property to `true` in ingress.tfvars.json config file.
+3. Use a private Route 53 VPC hosted zone for the deployment DNS because public DNS servers are not available.
+
+> The disconnected deployments cannot access the system and application internet services such as ArcGIS Online, My Esri, Esri license server, package repositories, pollination services, and time services.

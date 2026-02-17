@@ -1,0 +1,95 @@
+---
+# Copyright 2024-2025 Esri
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This playbook authorizes ArcGIS Server on the target machine, creates 
+# an ArcGIS Server site, sets the site's system properties, and configures
+# SSL certificates of the machine.
+
+- name: Configure ArcGIS Server
+  hosts: all
+  vars:
+    run_as_user: 'arcgis'
+    install_dir: '/opt'
+    system_properties: {}
+    services_dir_enabled: true
+    root_cert: ''
+    root_cert_alias: ''
+    keystore_file: ''
+    keystore_password: ''
+    cert_alias: ''
+    authorization_options: ''
+  tasks:
+    - name: Authorize ArcGIS Server
+      become: true
+      become_user: '{{ run_as_user }}'
+      vars:
+        ansible_aws_ssm_timeout: 600
+      ansible.builtin.command: '{{ install_dir }}/arcgis/server/tools/authorizeSoftware -f {{ authorization_file }} {{ authorization_options }}'
+      register: authorize_software
+      changed_when: authorize_software.rc == 0
+    - name: Start arcgisserver service
+      become: true
+      ansible.builtin.service:
+        name: 'arcgisserver'
+        state: started
+    - name: Install python modules 
+      become: true
+      ansible.builtin.pip:
+        name: 'requests_toolbelt'
+        state: present
+    - name: Create ArcGIS Server site
+      vars:
+        ansible_aws_ssm_timeout: 3600
+      no_log: false
+      arcgis.server.create_site:
+        server_url: 'https://localhost:6443/arcgis'
+        admin_username: '{{ admin_username }}'
+        admin_password: '{{ admin_password }}'
+        directories_root: '{{ directories_root }}'
+        config_store_type: '{{ config_store_type }}'
+        config_store_connection_string: '{{ config_store_connection_string }}'
+        config_store_connection_secret: ''
+        cloud_config: '{{ cloud_config }}'
+        log_level: '{{ log_level }}'
+        log_dir: '{{ log_dir }}'
+        max_log_file_age: '{{ max_log_file_age }}'
+    - name: Set ArcGIS Server system properties
+      vars:
+        ansible_aws_ssm_timeout: 600
+      no_log: false
+      arcgis.server.set_system_properties:
+        server_url: 'https://localhost:6443/arcgis'
+        admin_username: '{{ admin_username }}'
+        admin_password: '{{ admin_password }}'
+        system_properties: '{{ system_properties }}'
+        services_dir_enabled: '{{ services_dir_enabled }}'
+    - name: Check if the keystore file exists
+      ansible.builtin.stat:
+        path: '{{ keystore_file }}'
+      register: keystore        
+    - name: Configure SSL certificates in ArcGIS Server machine
+      vars:
+        ansible_aws_ssm_timeout: 600
+      no_log: false
+      arcgis.server.configure_https:
+        server_url: https://localhost:6443/arcgis
+        admin_username: '{{ admin_username }}'
+        admin_password: '{{ admin_password }}'
+        root_cert: '{{ root_cert }}'
+        root_cert_alias: '{{ root_cert_alias }}'
+        keystore_file: '{{ keystore_file }}'
+        keystore_password: '{{ keystore_password }}'
+        cert_alias: '{{ cert_alias }}'
+      when: keystore.stat.exists

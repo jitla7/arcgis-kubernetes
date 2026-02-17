@@ -1,0 +1,51 @@
+---
+# Copyright 2024 Esri
+#
+# Licensed under the Apache License Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This playbook creates directory for local repository.
+# In the directory it creates a manifest file from the provided template,
+# replacing the S3 bucket name, region, and local repository path with the
+# provided values. Then it uses arcgis.common.s3files module to download
+# setups and patches from the S3 bucket to the local repository.
+
+- name: Download files from S3 bucket to local directories
+  hosts: all
+  become: true
+  vars:
+    local_repository: '/opt/software/archives'
+    manifest: 's3files.json'
+    bucket_name: '<s3 bucket name>'
+    region: 'us-east-1'
+  tasks:
+    - name: Install python3-pip
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+    - name: Install boto3 python package
+      ansible.builtin.pip:
+        name: boto3
+    - name: Create local repository directory
+      ansible.builtin.file:
+        path: '{{ local_repository }}'
+        state: directory
+        mode: '0755'
+    - name: Create manifest file
+      ansible.builtin.template:
+        src: '{{ manifest }}'
+        dest: '{{ local_repository }}/{{ manifest | basename }}'
+        mode: '0644'
+    - name: Download setups from S3 repository
+      arcgis.common.s3files:
+        manifest: '{{ local_repository }}/{{ manifest | basename }}'
+
