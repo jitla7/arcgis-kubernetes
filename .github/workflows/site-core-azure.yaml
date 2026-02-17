@@ -27,7 +27,7 @@ on:
 env:
   TF_VAR_admin_email: ${{ secrets.ENTERPRISE_ADMIN_EMAIL }}
   TF_VAR_azure_region: ${{ vars.AZURE_DEFAULT_REGION }}
-  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
